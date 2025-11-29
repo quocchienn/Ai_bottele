@@ -74,6 +74,23 @@ async function addTokens(userId, amount, limit = 300) {
   return doc.tokens;
 }
 
+// ======================= HELPER TRÁNH CRASH TELEGRAM =======================
+async function safeReply(ctx, text, extra = {}) {
+  try {
+    return await ctx.reply(text, extra);
+  } catch (err) {
+    console.error("Lỗi gửi tin nhắn Telegram:", err);
+  }
+}
+
+async function safeReplyPhoto(ctx, buffer, extra = {}) {
+  try {
+    return await ctx.replyWithPhoto({ source: buffer }, extra);
+  } catch (err) {
+    console.error("Lỗi gửi ảnh Telegram:", err);
+  }
+}
+
 // ======================= GEMINI & TELEGRAM =======================
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
@@ -92,6 +109,17 @@ const modelImage = genAI.getGenerativeModel({
   model: "gemini-2.5-flash-image",
 });
 
+// ======================= /start =======================
+bot.start(async (ctx) => {
+  await safeReply(
+    ctx,
+    "Xin chào! Bot Gemini:\n" +
+      "- /chat + nội dung → chat với AI\n" +
+      "- /img + mô tả → tạo ảnh bằng AI\n\n" +
+      "Mỗi người có 300 token/ngày."
+  );
+});
+
 // ======================= LỆNH /chat =======================
 bot.command("chat", async (ctx) => {
   const userId = String(ctx.from.id);
@@ -99,47 +127,65 @@ bot.command("chat", async (ctx) => {
   try {
     const { allowed, used } = await canUseTokens(userId, 300);
     if (!allowed) {
-      return ctx.reply(
+      return safeReply(
+        ctx,
         `⛔ Bạn đã dùng hết 300 token hôm nay.\nToken hôm nay: ${used}/300\nReset sau 0h.`
       );
     }
 
     const prompt = ctx.message.text.replace("/chat", "").trim();
     if (!prompt) {
-      return ctx.reply("Nhập nội dung sau /chat");
+      return safeReply(ctx, "Nhập nội dung sau /chat");
     }
 
     // Giới hạn độ dài input để đỡ tốn
     if (prompt.length > 500) {
-      return ctx.reply("Tin nhắn quá dài! Giới hạn 500 ký tự.");
+      return safeReply(ctx, "Tin nhắn quá dài! Giới hạn 500 ký tự.");
     }
 
-    const reply = await modelChat.generateContent(prompt);
-    const text = reply.response.text();
+    let reply;
+    try {
+      reply = await modelChat.generateContent(prompt);
+    } catch (err) {
+      console.error("Lỗi gọi Gemini trong /chat:", err);
 
+      if (err.status === 429) {
+        return safeReply(
+          ctx,
+          "Gemini báo vượt hạn mức free (429 Too Many Requests).\nĐợi vài chục giây rồi thử lại, hoặc hạn chế spam lệnh."
+        );
+      }
+
+      return safeReply(ctx, "Lỗi server AI, thử lại sau.");
+    }
+
+    const text = reply.response.text();
     const usedTokens = countTokens(text);
     const total = await addTokens(userId, usedTokens, 300);
 
-    await ctx.reply(
+    await safeReply(
+      ctx,
       `${text}\n\n🔹 Token đã dùng hôm nay: ${total}/300`
     );
   } catch (err) {
-    console.error(err);
-    ctx.reply("Lỗi chat AI");
+    console.error("Lỗi handler /chat:", err);
+    await safeReply(ctx, "Lỗi xử lý phía bot.");
   }
 });
 
 // ======================= LỆNH /img (TẠO ẢNH THẬT) =======================
 bot.command("img", async (ctx) => {
+  const prompt = ctx.message.text.replace("/img", "").trim();
+  if (!prompt) {
+    return safeReply(
+      ctx,
+      "Nhập mô tả ảnh sau /img\nVD: /img cô gái anime tóc trắng đứng cạnh siêu xe ban đêm, phong cách cyberpunk"
+    );
+  }
+
+  await safeReply(ctx, "⏳ Đang tạo ảnh bằng Gemini, chờ chút...");
+
   try {
-    const prompt = ctx.message.text.replace("/img", "").trim();
-    if (!prompt) {
-      return ctx.reply("Nhập mô tả ảnh sau /img\nVí dụ: /img một chàng trai ngầu đứng cạnh siêu xe ban đêm, style cyberpunk");
-    }
-
-    await ctx.reply("⏳ Đang tạo ảnh bằng Gemini, chờ chút...");
-
-    // Gọi model tạo ảnh
     const result = await modelImage.generateContent({
       contents: [
         {
@@ -147,11 +193,10 @@ bot.command("img", async (ctx) => {
           parts: [{ text: prompt }],
         },
       ],
-      // Có thể thêm config aspectRatio nếu muốn
       generationConfig: {
         responseModalities: ["IMAGE"],
         imageConfig: {
-          aspectRatio: "1:1", // 1:1, 16:9, 9:16...
+          aspectRatio: "1:1",
         },
       },
     });
@@ -166,59 +211,49 @@ bot.command("img", async (ctx) => {
 
     if (!imagePart) {
       console.error("Không tìm thấy imagePart trong phản hồi Gemini:", parts);
-      return ctx.reply("Gemini không trả về ảnh, thử mô tả rõ hơn hoặc khác đi.");
+      return safeReply(
+        ctx,
+        "Gemini không trả về ảnh. Thử mô tả rõ hơn, cụ thể hơn."
+      );
     }
 
     const base64 = imagePart.inlineData.data;
     const buffer = Buffer.from(base64, "base64");
 
-    await ctx.replyWithPhoto(
-      { source: buffer },
-      { caption: `Ảnh tạo bởi Gemini từ prompt:\n"${prompt}"` }
-    );
+    await safeReplyPhoto(ctx, buffer, {
+      caption: `Ảnh tạo bởi Gemini từ prompt:\n"${prompt}"`,
+    });
   } catch (err) {
     console.error("Lỗi /img:", err);
-    ctx.reply("Lỗi tạo ảnh AI, thử lại sau.");
-  }
-});
 
-// ======================= CHAT TỰ NHIÊN =======================
-bot.on("text", async (ctx) => {
-  // Bỏ qua nếu là lệnh (đã xử lý ở trên)
-  if (ctx.message.text.startsWith("/")) return;
-
-  const userId = String(ctx.from.id);
-
-  try {
-    const { allowed, used } = await canUseTokens(userId, 300);
-    if (!allowed) {
-      return ctx.reply(
-        `⛔ Bạn đã dùng hết 300 token hôm nay.\nToken hôm nay: ${used}/300\nReset sau 0h.`
+    if (err.status === 429) {
+      return safeReply(
+        ctx,
+        "Gemini tạo ảnh đang vượt hạn mức free (429). Thử lại sau ít phút."
       );
     }
 
-    const prompt = ctx.message.text;
-
-    // Giới hạn input chat thường
-    if (prompt.length > 300) {
-      return ctx.reply("Tin nhắn quá dài! Giới hạn 300 ký tự.");
-    }
-
-    const reply = await modelChat.generateContent(prompt);
-    const text = reply.response.text();
-
-    const usedTokens = countTokens(text);
-    const total = await addTokens(userId, usedTokens, 300);
-
-    await ctx.reply(
-      `${text}\n\n🔹 Token đã dùng hôm nay: ${total}/300`
-    );
-  } catch (err) {
-    console.error(err);
-    ctx.reply("Lỗi xử lý văn bản");
+    await safeReply(ctx, "Lỗi tạo ảnh AI, thử lại sau.");
   }
+});
+
+// ======================= CHAT TEXT THƯỜNG =======================
+// Không gọi Gemini nữa để tránh spam quota.
+// Chỉ nhắc user dùng /chat hoặc /img.
+bot.on("text", async (ctx) => {
+  if (ctx.message.text.startsWith("/")) return; // lệnh đã xử lý ở trên
+
+  await safeReply(
+    ctx,
+    "Dùng lệnh:\n" +
+      "- /chat + nội dung → chat AI\n" +
+      "- /img + mô tả → tạo ảnh AI\n\n" +
+      "Mỗi người có 300 token chat/ngày."
+  );
 });
 
 // ======================= START BOT =======================
 bot.launch();
-console.log("🤖 Bot Gemini đang chạy (chat + tạo ảnh thật + limit 300 token/ngày)");
+console.log(
+  "🤖 Bot Gemini đang chạy (chat + tạo ảnh thật + limit 300 token/ngày, có xử lý 429 & timeout Telegram)"
+);
