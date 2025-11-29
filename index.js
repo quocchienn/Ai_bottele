@@ -1,6 +1,7 @@
 import { Telegraf } from "telegraf";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import http from "http";
 
 dotenv.config();
 
@@ -59,7 +60,7 @@ bot.command("chat", async (ctx) => {
     if (err.status === 429) {
       return safeReply(
         ctx,
-        "Gemini đang bị hạn mức (429). Thử lại sau vài giây."
+        "Gemini đang bị hạn mức (429 Too Many Requests). Thử lại sau ít giây."
       );
     }
 
@@ -71,8 +72,23 @@ bot.command("chat", async (ctx) => {
 });
 
 // ======================= KHÔNG AUTO TRẢ LỜI TIN NHẮN =======================
-// bot.on("text") đã bị xoá theo yêu cầu.
+// Không có bot.on("text") theo yêu cầu.
+
+// ======================= HTTP SERVER CHO RENDER (NẾU DÙNG WEB SERVICE) =======================
+const PORT = process.env.PORT || 10000;
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot Gemini is running\n");
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 HTTP server lắng trên port ${PORT} (cho Render health-check)`);
+});
 
 // ======================= START BOT =======================
-bot.launch();
-console.log("🤖 Bot Gemini đang chạy (không giới hạn, không tạo ảnh, không auto chat)");
+bot.launch().then(() => {
+  console.log("🤖 Bot Gemini đang chạy (không giới hạn, không tạo ảnh, không auto chat)");
+}).catch((err) => {
+  console.error("Lỗi launch bot:", err);
+});
